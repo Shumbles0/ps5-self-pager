@@ -9,6 +9,10 @@
 #include <sys/mman.h>
 #include <sys/elf64.h>
 #include <sys/stat.h>
+#ifdef DUMP_GAME
+#include <sys/param.h>
+#include <sys/mount.h>
+#endif
 
 #include "selfpager.h"
 
@@ -58,7 +62,7 @@ int decrypt_self_by_path(const char *input_file_path, const char *output_file_pa
     close(input_file_fd);
     if (res == DECRYPT_ERROR_INPUT_NOT_SELF) {
         return res;
-    } else if (res != 0) {
+    } else if (res != 0 && res != DECRYPT_SUCCESS_PLAINTEXT_SELF) {
         printf("Failed to decrypt self: %s , error %d\n", input_file_path, res);
         if (num_failed) (*num_failed)++;
         return res;
@@ -89,7 +93,9 @@ int decrypt_self_by_path(const char *input_file_path, const char *output_file_pa
         if (num_failed) (*num_failed)++;
         return -1;
     }
-    printf("Decrypted self: '%s' -> '%s'\n", input_file_path, output_file_path);
+    printf("%s: '%s' -> '%s'\n",
+           res == DECRYPT_SUCCESS_PLAINTEXT_SELF ? "Unwrapped plaintext self" : "Decrypted self",
+           input_file_path, output_file_path);
 
     if (num_success) (*num_success)++;
     return res;
@@ -119,7 +125,30 @@ static int decrypt_all_selfs_in_directory(const char *input_dir_path, const char
             continue;
         }
 
-        if (entry->d_type == DT_DIR && recursive) {
+        int path_len = snprintf(inpath, sizeof(inpath), "%s/%s", input_dir_path, name);
+        if (path_len < 0 || (size_t)path_len >= sizeof(inpath)) {
+            printf("Skipping input path that is too long: %s/%s\n", input_dir_path, name);
+            continue;
+        }
+        path_len = snprintf(outpath, sizeof(outpath), "%s/%s", output_dir_path, name);
+        if (path_len < 0 || (size_t)path_len >= sizeof(outpath)) {
+            printf("Skipping output path that is too long: %s/%s\n", output_dir_path, name);
+            continue;
+        }
+
+        unsigned char entry_type = entry->d_type;
+        if (entry_type == DT_UNKNOWN) {
+            struct stat st;
+            // Do not follow symlinks: keep the same scope as known d_type entries.
+            if (lstat(inpath, &st) != 0) {
+                printf("Failed to determine entry type: %s: %s\n", inpath, strerror(errno));
+                continue;
+            }
+            if (S_ISDIR(st.st_mode)) entry_type = DT_DIR;
+            else if (S_ISREG(st.st_mode)) entry_type = DT_REG;
+        }
+
+        if (entry_type == DT_DIR && recursive) {
             // if the input dir starts with "/mnt/sandbox/pfsmnt" skip entry if ends with "-app0-patch0-union",
             // we only care about app0 and patch0
             if (entry->d_namlen == sizeof("PPSA00000-app0-patch0-union") - 1 &&
@@ -128,10 +157,8 @@ static int decrypt_all_selfs_in_directory(const char *input_dir_path, const char
                 continue;
             }
 
-            snprintf(inpath, sizeof(inpath), "%s/%s", input_dir_path, name);
-            snprintf(outpath, sizeof(outpath), "%s/%s", output_dir_path, name);
             decrypt_all_selfs_in_directory(inpath, outpath, recursive, num_success, num_failed);
-        } else if (entry->d_type == DT_REG) {
+        } else if (entry_type == DT_REG) {
             int has_allowed_ext = 0;
             const char *ext = strrchr(name, '.');
             for (int i = 0; i < allowed_exts_count; i++) {
@@ -144,8 +171,6 @@ static int decrypt_all_selfs_in_directory(const char *input_dir_path, const char
                 continue;
             }
 
-            snprintf(outpath, sizeof(outpath), "%s/%s", output_dir_path, name);
-            snprintf(inpath, sizeof(inpath), "%s/%s", input_dir_path, name);
             decrypt_self_by_path(inpath, outpath, num_success, num_failed);
         }
     }
@@ -153,6 +178,50 @@ static int decrypt_all_selfs_in_directory(const char *input_dir_path, const char
     closedir(dir);
     return 0;
 }
+
+#ifdef DUMP_GAME
+static void decrypt_shadowmount_games(const char *output_base_path, int *num_success, int *num_failed) {
+    // ShadowMountPlus mounts its game sources here using nullfs, optionally
+    // with a unionfs backport overlay. Do not scan unmounted title directories
+    // or raw image/container mounts, which can duplicate the same game.
+    const char *root = "/system_ex/app";
+    DIR *dir = opendir(root);
+    if (!dir) {
+        printf("Cannot scan ShadowMount game mounts: %s: %s\n", root, strerror(errno));
+        return;
+    }
+
+    struct dirent *entry;
+    while ((entry = readdir(dir)) != NULL) {
+        const char *name = entry->d_name;
+        if (strcmp(name, ".") == 0 || strcmp(name, "..") == 0) continue;
+
+        char inpath[PATH_MAX], outpath[PATH_MAX];
+        int len = snprintf(inpath, sizeof(inpath), "%s/%s", root, name);
+        if (len < 0 || (size_t)len >= sizeof(inpath)) continue;
+        struct stat st;
+        if (lstat(inpath, &st) != 0) {
+            printf("Failed to inspect title directory: %s: %s\n", inpath, strerror(errno));
+            continue;
+        }
+        if (!S_ISDIR(st.st_mode)) continue;
+        struct statfs fs;
+        if (statfs(inpath, &fs) != 0) {
+            printf("Failed to inspect game mount: %s: %s\n", inpath, strerror(errno));
+            continue;
+        }
+        if (strcmp(fs.f_mntonname, inpath) != 0 ||
+            (strcmp(fs.f_fstypename, "nullfs") != 0 &&
+             strcmp(fs.f_fstypename, "unionfs") != 0)) continue;
+
+        len = snprintf(outpath, sizeof(outpath), "%s%s", output_base_path, inpath);
+        if (len < 0 || (size_t)len >= sizeof(outpath)) continue;
+        printf("Scanning mounted game: %s (%s)\n", inpath, fs.f_fstypename);
+        decrypt_all_selfs_in_directory(inpath, outpath, 1, num_success, num_failed);
+    }
+    closedir(dir);
+}
+#endif
 
 int main() {
     int num_success = 0;
@@ -181,6 +250,7 @@ int main() {
 #ifdef DUMP_GAME
     snprintf(output_path, sizeof(output_path), "%s/mnt/sandbox/pfsmnt", output_base_path);
     decrypt_all_selfs_in_directory("/mnt/sandbox/pfsmnt", output_path, 1, &num_success, &num_failed);
+    decrypt_shadowmount_games(output_base_path, &num_success, &num_failed);
 #endif
 
     printf("Done. Success: %d, Failed: %d\n", num_success, num_failed);

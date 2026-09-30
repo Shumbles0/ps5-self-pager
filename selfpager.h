@@ -9,12 +9,14 @@ void *mmap_self(void *addr, size_t len, int prot, int flags, int fd, off_t offse
 void *map_self_segment(int fd, Elf64_Phdr *phdr, int segment_index);
 
 // these are the return values for decrypt_self
+#define DECRYPT_SUCCESS_PLAINTEXT_SELF 1
 #define DECRYPT_ERROR_IO -2
 #define DECRYPT_ERROR_INTERNAL -3
 #define DECRYPT_ERROR_UNSUPPORTED_FW -4
 #define DECRYPT_ERROR_INPUT_NOT_SELF -5
-// this happens if you try to decrypt an fself or a self with unavailable keys
+// the kernel pager could not load an encrypted/compressed segment
 #define DECRYPT_ERROR_FAILED_TO_DECRYPT_SEGMENT_DATA -6
 
-// on success returns a pointer to the decrypted elf in out_data, you must free this with munmap
+// Success is 0 (pager used) or DECRYPT_SUCCESS_PLAINTEXT_SELF (plaintext unwrapped).
+// out_data holds a reconstructed ELF in either case; free it with munmap.
 int decrypt_self(int input_file_fd, char **out_data, uint64_t *out_size);

@@ -44,6 +44,7 @@ struct rlimit { uint64_t rlim_cur, rlim_max; };
 #define ELFDATA2LSB 1
 #define PT_LOAD 1
 #define LOG_ERROR(...) fprintf(stderr, __VA_ARGS__)
+#define PAGER_TRACE(...) ((void)0)
 #include "self-constants.inc"
 #include "self-structs.inc"
 #include "self-errors.inc"

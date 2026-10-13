@@ -14,6 +14,10 @@
 
 #include "selfpager.h"
 
+#ifdef SELF_PAGER_TRACE
+FILE *selfpager_trace_log = NULL;
+#endif
+
 #define SELF_ORBIS_MAGIC 0x1D3D154F
 #define SELF_PROSPERO_MAGIC 0xEEF51454
 #define PAGE_SIZE 0x4000
@@ -253,9 +257,12 @@ static int read_plain_self_segment(int fd, const struct sce_self_header *header,
         phdr->p_filesz > input_size - data_entry.offset || phdr->p_filesz > SSIZE_MAX) {
         return DECRYPT_ERROR_INTERNAL;
     }
+    PAGER_TRACE("Reading plaintext segment %d: source offset=0x%llx size=%llu bytes\n",
+                segment_index, (unsigned long long)data_entry.offset, (unsigned long long)phdr->p_filesz);
     if (pread(fd, dest, phdr->p_filesz, data_entry.offset) != (ssize_t)phdr->p_filesz) {
         return DECRYPT_ERROR_IO;
     }
+    PAGER_TRACE("Finished plaintext segment %d\n", segment_index);
     return 1;
 }
 
@@ -287,6 +294,7 @@ int decrypt_self(int input_file_fd, char **out_data, uint64_t *out_size) {
     *out_size = 0;
 
     struct sce_self_header self_header;
+    PAGER_TRACE("Reading SELF header\n");
     ssize_t pread_res = pread(input_file_fd, &self_header, sizeof(self_header), 0);
     if (pread_res == -1) {
         LOG_ERROR("Failed to read self header | errno: %d (%s)\n", errno, strerror(errno));
@@ -305,11 +313,13 @@ int decrypt_self(int input_file_fd, char **out_data, uint64_t *out_size) {
     }
 
     struct stat input_file_stat;
+    PAGER_TRACE("Checking SELF file size\n");
     if (fstat(input_file_fd, &input_file_stat) != 0 || input_file_stat.st_size < 0) {
         return DECRYPT_ERROR_IO;
     }
     uint64_t input_size = input_file_stat.st_size;
     Elf64_Ehdr elf_header;
+    PAGER_TRACE("Reading embedded ELF header (%u SELF entries)\n", self_header.segment_count);
     int self_elf_header_offset = sizeof(struct sce_self_header) + (sizeof(struct sce_self_segment_header) * self_header.segment_count);
     if ((uint64_t)self_elf_header_offset + sizeof(elf_header) > self_header.header_size ||
         (uint64_t)self_header.header_size + self_header.metadata_size > input_size) {
@@ -340,6 +350,7 @@ int decrypt_self(int input_file_fd, char **out_data, uint64_t *out_size) {
     Elf64_Phdr phdrs[elf_header.e_phnum];
     int phdrs_size = elf_header.e_phnum * sizeof(Elf64_Phdr);
     off_t self_elf_phdrs_offset = self_elf_header_offset + elf_header.e_phoff;
+    PAGER_TRACE("Reading ELF program headers (%u segments)\n", elf_header.e_phnum);
     if (pread(input_file_fd, phdrs, phdrs_size, self_elf_phdrs_offset) != phdrs_size) {
         LOG_ERROR("Failed to read program headers\n");
         return DECRYPT_ERROR_IO;
@@ -366,6 +377,7 @@ int decrypt_self(int input_file_fd, char **out_data, uint64_t *out_size) {
         return DECRYPT_ERROR_INTERNAL;
     }
 
+    PAGER_TRACE("Allocating ELF output buffer: %llu bytes\n", (unsigned long long)output_file_size);
     void *out_buf = mmap(NULL, output_file_size, PROT_READ | PROT_WRITE, MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
     if (out_buf == MAP_FAILED) {
         LOG_ERROR("Failed to mmap output buffer | errno: %d (%s)\n", errno, strerror(errno));
@@ -378,6 +390,8 @@ int decrypt_self(int input_file_fd, char **out_data, uint64_t *out_size) {
         if ((phdr->p_type != PT_LOAD && phdr->p_type != PT_SCE_DYNLIBDATA && phdr->p_type != PT_SCE_RELRO && phdr->p_type != PT_SCE_COMMENT) || phdr->p_filesz == 0) {
             continue;
         }
+        PAGER_TRACE("Processing ELF segment %d: type=0x%x size=%llu bytes\n",
+                    i, phdr->p_type, (unsigned long long)phdr->p_filesz);
         int plain_res = read_plain_self_segment(input_file_fd, &self_header, input_size,
                                                phdr, i, (uint8_t *)out_buf + phdr->p_offset);
         if (plain_res < 0) {
@@ -390,6 +404,7 @@ int decrypt_self(int input_file_fd, char **out_data, uint64_t *out_size) {
             continue;
         }
         pager_segments++;
+        PAGER_TRACE("Mapping segment %d with kernel SELF pager\n", i);
         void *mapped_segment = map_self_segment(input_file_fd, phdr, i);
         if (mapped_segment == MAP_FAILED) {
             if (errno == ENOSYS) {
@@ -402,6 +417,7 @@ int decrypt_self(int input_file_fd, char **out_data, uint64_t *out_size) {
             return DECRYPT_ERROR_INTERNAL;
         }
 
+        PAGER_TRACE("Loading kernel SELF pager segment %d\n", i);
         if (mlock(mapped_segment, phdr->p_filesz)) {
             int lock_errno = errno;
             LOG_ERROR("Failed to decrypt segment data | segment %d | errno: %d (%s) | firmware: 0x%x\n",
@@ -432,12 +448,14 @@ int decrypt_self(int input_file_fd, char **out_data, uint64_t *out_size) {
             return DECRYPT_ERROR_FAILED_TO_DECRYPT_SEGMENT_DATA;
         }
 
+        PAGER_TRACE("Copying kernel SELF pager segment %d\n", i);
         memcpy((uint8_t *)out_buf + phdr->p_offset, mapped_segment, phdr->p_filesz);
 
         munmap(mapped_segment, phdr->p_filesz);
     }
 
     if (version_segment_index != -1) {
+        PAGER_TRACE("Reading version segment %d\n", version_segment_index);
         Elf64_Phdr *phdr = &phdrs[version_segment_index];
         if (phdr->p_filesz > input_size) {
             LOG_ERROR("Invalid version segment bounds\n");
@@ -460,5 +478,6 @@ int decrypt_self(int input_file_fd, char **out_data, uint64_t *out_size) {
 
     *out_data = out_buf;
     *out_size = output_file_size;
+    PAGER_TRACE("ELF reconstruction complete: %d plaintext segments %d pager segments\n", plain_segments, pager_segments);
     return plain_segments && !pager_segments ? DECRYPT_SUCCESS_PLAINTEXT_SELF : 0;
 }

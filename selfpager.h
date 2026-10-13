@@ -1,6 +1,18 @@
 #include <sys/types.h>
 #include <sys/elf64.h>
 
+// Optional progress diagnostics, flushed before operations that may block.
+#ifdef SELF_PAGER_TRACE
+#include <stdio.h>
+extern FILE *selfpager_trace_log;
+#define PAGER_TRACE(...) do { \
+    fprintf(stderr, __VA_ARGS__); fflush(stderr); \
+    if (selfpager_trace_log) { fprintf(selfpager_trace_log, __VA_ARGS__); fflush(selfpager_trace_log); } \
+} while (0)
+#else
+#define PAGER_TRACE(...) ((void)0)
+#endif
+
 // errors only
 #define SELF_PAGER_DO_LOGGING 1
 

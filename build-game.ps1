@@ -1,6 +1,7 @@
 param(
     [string]$Sdk = (Join-Path $PSScriptRoot '../sdk-installed/ps5-payload-sdk'),
-    [string]$LlvmBin = 'C:\Program Files\LLVM\bin'
+    [string]$LlvmBin = 'C:\Program Files\LLVM\bin',
+    [switch]$Trace
 )
 $ErrorActionPreference = 'Stop'
 $Sdk = (Resolve-Path -LiteralPath $Sdk).Path
@@ -13,12 +14,14 @@ $compileFlags = @(
     '-isystem', (Join-Path $Sdk 'target/include'),
     '-fno-stack-protector', '-fno-plt', '-femulated-tls', '-O2', '-Wall', '-DDUMP_GAME'
 )
+if ($Trace) { $compileFlags += '-DSELF_PAGER_TRACE' }
 foreach ($source in @('main', 'selfpager')) {
     & $clang @compileFlags -c (Join-Path $PSScriptRoot "$source.c") -o (Join-Path $build "$source.o")
     if ($LASTEXITCODE -ne 0) { throw "Compilation failed: $source.c" }
 }
 # Use the SDK's prospero-lld link settings directly, preserving paths with spaces.
-$output = Join-Path $PSScriptRoot 'ps5-self-pager-game.elf'
+$outputName = if ($Trace) { 'ps5-self-pager-game-progress.elf' } else { 'ps5-self-pager-game.elf' }
+$output = Join-Path $PSScriptRoot $outputName
 & $linker -m elf_x86_64 -pie --eh-frame-hdr -z max-page-size=0x4000 `
     -T (Join-Path $Sdk 'ldscripts/elf_x86_64.x') `
     -L (Join-Path $Sdk 'target/lib') -o $output `

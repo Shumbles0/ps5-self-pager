@@ -36,6 +36,8 @@ traversal or file filtering. Symlinks remain excluded. The extensions remain
 `.elf`, `.self`, `.prx`, `.sprx`, and `.bin`, matched without case sensitivity;
 every eligible regular file still goes through `decrypt_self_by_path` and
 `decrypt_self`.
+Each directory's eligible files are processed before visiting its
+subdirectories, so a large asset tree does not delay the root executable.
 
 Unencrypted, uncompressed SELF data entries are read directly from their
 container offsets and assembled at their ELF program-header offsets. Metadata
@@ -72,6 +74,12 @@ encrypted/compressed dispatch, malformed bounds, duplicates, and cleanup.
 
 On Windows, `./build-game.ps1` uses LLVM and the installed SDK to build the game
 ELF. Override `-Sdk` and `-LlvmBin` if they are stored elsewhere.
+Use `./build-game.ps1 -Trace` to create `ps5-self-pager-game-progress.elf`.
+This diagnostic build flushes progress before directory scans, file reads,
+segment processing, and output writes. It also saves the progress to
+`pager-progress.log` under the selected dump directory, replacing the previous
+progress log each run. The saved log can be inspected when the sender only
+captures part of the console output.
 
 ## Note
 Since we are modifying the `pagertab`, there is a small window (~20-60 microseconds per mapping/segment, the actual decryption work happens on page fault, and by then we restored the `pagertab`) where if any process maps a file, it would receive a self pager, which would not be able to handle a regular file so the process would receive a `SIGSEGV` if the memory was accessed directly, and likely crash. However I would expect this to be rare, you might never encounter it. If this does happen it just crashes the game/process, not the entire console.

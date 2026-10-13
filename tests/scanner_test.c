@@ -16,6 +16,7 @@
 #define S_ISREG(mode) ((mode) == DT_REG)
 #define strcasecmp _stricmp
 #define DUMP_GAME
+#define PAGER_TRACE(...) ((void)0)
 
 struct dirent { unsigned char d_type; size_t d_namlen; char d_name[128]; };
 struct stat { int st_mode; };
@@ -25,9 +26,9 @@ struct node { const char *path; int type; const char *fs; const char *mount; };
 static const struct node nodes[] = {
     {"/mnt/sandbox/pfsmnt", DT_DIR},
     {"/mnt/sandbox/pfsmnt/PPSA00001-app0", DT_DIR},
-    {"/mnt/sandbox/pfsmnt/PPSA00001-app0/eboot.bin", DT_REG},
     {"/mnt/sandbox/pfsmnt/PPSA00001-app0/lib", DT_DIR},
     {"/mnt/sandbox/pfsmnt/PPSA00001-app0/lib/test.SPRX", DT_REG},
+    {"/mnt/sandbox/pfsmnt/PPSA00001-app0/eboot.bin", DT_REG},
     {"/mnt/sandbox/pfsmnt/PPSA00001-app0/readme.txt", DT_REG},
     {"/mnt/sandbox/pfsmnt/PPSA00001-app0/link.self", DT_LNK},
     {"/mnt/sandbox/pfsmnt/PPSA00001-app0/gone.self", -1},
@@ -48,6 +49,7 @@ static const struct node nodes[] = {
     {"/system_ex/app/PPSA00006", DT_LNK},
 };
 static int unknown_entries, lstat_calls, decrypt_calls;
+static char first_input[PATH_MAX];
 static const struct node *find_node(const char *path) {
     for (size_t i = 0; i < sizeof(nodes)/sizeof(nodes[0]); i++)
         if (strcmp(nodes[i].path, path) == 0) return &nodes[i];
@@ -89,6 +91,7 @@ static struct dirent *readdir(DIR *dir) {
     }
     return NULL;
 }
+static void rewinddir(DIR *dir) { dir->index = 0; }
 static int closedir(DIR *dir) { free(dir); return 0; }
 static int decrypt_self_by_path(const char *in, const char *out, int *success, int *failed) {
     (void)failed;
@@ -97,6 +100,7 @@ static int decrypt_self_by_path(const char *in, const char *out, int *success, i
     assert(strstr(in, "link") == NULL);
     assert(strstr(in, "readme") == NULL);
     assert(strncmp(out, "/dump", 5) == 0 && strcmp(out + 5, in) == 0);
+    if (decrypt_calls == 0) snprintf(first_input, sizeof(first_input), "%s", in);
     decrypt_calls++;
     (*success)++;
     return 0;
@@ -110,8 +114,11 @@ int main(void) {
         decrypt_calls = lstat_calls = 0;
         assert(decrypt_all_selfs_in_directory("/mnt/sandbox/pfsmnt", "/dump/mnt/sandbox/pfsmnt", 1, &success, &failed) == 0);
         assert(success == 3 && failed == 0 && decrypt_calls == 3);
-        // Known types only need lstat for the deliberately disappearing entry.
-        assert(unknown_entries ? lstat_calls > 1 : lstat_calls == 1);
+        // The library directory is listed first, but eboot must be processed
+        // before recursion so a large asset tree cannot delay root files.
+        assert(strcmp(first_input, "/mnt/sandbox/pfsmnt/PPSA00001-app0/eboot.bin") == 0);
+        // Known types only stat the disappearing entry in the two passes.
+        assert(unknown_entries ? lstat_calls > 2 : lstat_calls == 2);
         decrypt_shadowmount_games("/dump", &success, &failed);
         assert(success == 5 && failed == 0 && decrypt_calls == 5);
         success = decrypt_calls = 0;
@@ -119,6 +126,6 @@ int main(void) {
         assert(success == 1 && decrypt_calls == 1);
         assert(decrypt_all_selfs_in_directory(NULL, "/dump", 1, &success, &failed) == -1);
     }
-    puts("PASS: known/unknown types, recursion, extension filters, symlinks, missing entries, union exclusion, mount selection, output paths");
+    puts("PASS: known/unknown types, files before recursion, extension filters, symlinks, missing entries, union exclusion, mount selection, output paths");
     return 0;
 }
